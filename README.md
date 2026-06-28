@@ -1,8 +1,8 @@
-# 🎓 Campus Navigation Bot
+# AI Campus Navigator
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org) [![Streamlit](https://img.shields.io/badge/UI-Streamlit-red)](https://streamlit.io) [![Gemini AI](https://img.shields.io/badge/AI-Gemini--Flash-orange)](https://deepmind.google/technologies/gemini/)
 
-An interactive campus routing and pathfinding application utilizing OpenStreetMap XML data, NetworkX for graph pathfinding algorithms (BFS, DFS, UCS, A*), and Gemini 2.5 Flash for natural language campus assistance.
+AI-powered campus pathfinding application leveraging OpenStreetMap data, graph algorithms, and Gemini AI for natural language routing.
 
 ## 🚀 Key Technologies
 - **Routing Engine**: Python, NetworkX, OSMnx
