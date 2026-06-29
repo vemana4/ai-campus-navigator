@@ -37,20 +37,41 @@ What truly elevates this application is its seamless integration with the advanc
 ai-campus-navigator/
 ├── LICENSE
 ├── README.md
-├── app.py                     # Main Streamlit Dashboard UI Application
-├── gemini_integration.py      # Gemini Flash API call coordinator
-├── pathfinding.py             # Graph traversal algorithms implementation
-├── pyproject.toml             # Python package definitions
-├── uv.lock                    # Dependency lockfile
-├── secrets.toml               # Streamlit API key configuration
-├── docs/                      # CSV nodes lists & reports
-│   ├── Extracted_Edges__from_KML_LineStrings_.csv
-│   ├── Extracted_Nodes__from_KML_.csv
-│   ├── map.png
-│   └── ucs_hostel_path.png
-└── attached_assets/
-    ├── Book1_1758707719037.xlsx # Original mapping spreadsheets
-    └── map_1758707724808.osm    # Raw OSM geographical data
+├── app.py                     # Minimal Streamlit Main Entrypoint
+├── pyproject.toml             # Python Package configuration
+├── uv.lock                    # Fast Package Manager lockfile
+├── Dockerfile                 # Multi-stage Docker Container blueprint
+├── docker-compose.yml         # Compose Orchestrator configuration
+├── .env.example               # Template Environment credentials
+├── src/                       # Core Source Directory
+│   ├── logger.py              # Structured JSON logging service
+│   ├── pathfinding.py         # Pathfinding algorithms & POI definitions
+│   ├── ai_assistant.py        # Gemini AI Assistant engine
+│   └── ui/                    # Streamlit component modules
+│       ├── sidebar.py         # Sidebar rendering & chat inputs
+│       ├── map_viewer.py      # Map layer rendering
+│       └── comparison.py      # Benchmarking matrices renderer
+├── tests/                     # Automated test suite
+│   ├── test_pathfinding.py    # Unit tests for BFS, DFS, UCS, A* search
+│   └── test_ai_assistant.py   # Unit tests for NLP matching and normalization
+└── docs/                      # Mapping datasets & documents
+    ├── Extracted_Edges__from_KML_LineStrings_.csv
+    ├── Extracted_Nodes__from_KML_.csv
+    ├── map.png
+    └── ucs_hostel_path.png
+```
+
+### 🔀 System Data Flow
+
+```mermaid
+graph TD
+    OSM[attached_assets/map.osm] -->|ox.graph_from_xml| Pathfinder[src/pathfinding.py]
+    UserQuery[User Chat Input] -->|gemini.get_response| AI[src/ai_assistant.py]
+    AI -->|gemini-2.5-flash| GoogleAI[Google GenAI API]
+    AI -->|Parsed locations| Pathfinder
+    Pathfinder -->|nx.shortest_path| Algos[BFS, DFS, UCS, A* Search]
+    Algos -->|Route metrics & paths| View[src/ui/map_viewer.py]
+    View -->|st_folium| Map[Interactive Folium Map layer]
 ```
 
 ---

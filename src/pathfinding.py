@@ -3,17 +3,30 @@ import networkx as nx
 import folium
 import heapq
 import math
-import pandas as pd
 from collections import deque
 from typing import Dict, List, Tuple, Any, Optional
+from src.logger import logger
+
+class OSMDataLoadError(Exception):
+    """Raised when there is an issue loading or parsing the OSM XML file."""
+    pass
+
+class PathNotFoundError(Exception):
+    """Raised when no path exists between the selected POIs."""
+    pass
 
 class CampusPathfinder:
     def __init__(self, osm_file_path: str):
         """Initialize the pathfinder with OSM data."""
-        self.graph = ox.graph_from_xml(osm_file_path, simplify=False)
-        self.nodes, self.edges = ox.graph_to_gdfs(self.graph)
-        self.center = (self.nodes.geometry.y.mean(), self.nodes.geometry.x.mean())
-        
+        logger.info(f"Initializing CampusPathfinder with OSM file: {osm_file_path}")
+        try:
+            self.graph = ox.graph_from_xml(osm_file_path, simplify=False)
+            self.nodes, self.edges = ox.graph_to_gdfs(self.graph)
+            self.center = (self.nodes.geometry.y.mean(), self.nodes.geometry.x.mean())
+        except Exception as e:
+            logger.error(f"Failed to load OSM graph from xml: {e}", exc_info=True)
+            raise OSMDataLoadError(f"Error parsing OSM XML data: {e}")
+
         # Points of Interest with coordinates (lat, lon)
         self.POIS = {
             "Flag post": (13.22169, 77.75495),
@@ -56,7 +69,6 @@ class CampusPathfinder:
         manhattan = self.manhattan_heuristic(node1, node2)
         return 0.7 * euclidean + 0.3 * manhattan
     
-    # Backward compatibility
     def heuristic(self, node1: int, node2: int) -> float:
         """Default heuristic (Euclidean distance) for backward compatibility."""
         return self.euclidean_heuristic(node1, node2)
@@ -103,7 +115,7 @@ class CampusPathfinder:
     
     def ucs_osm(self, start: int, end: int) -> Tuple[Optional[List[int]], Optional[float], set]:
         """Uniform Cost Search implementation."""
-        frontier = [(0, [start])]
+        frontier = [(0.0, [start])]
         explored = set()
         
         while frontier:
@@ -119,22 +131,21 @@ class CampusPathfinder:
                     if nbr not in explored:
                         edge_data = self.graph.get_edge_data(node, nbr)
                         if edge_data:
-                            weight = min([d.get('length', 1) for d in edge_data.values()])
+                            weight = min([d.get('length', 1.0) for d in edge_data.values()])
                             heapq.heappush(frontier, (cost + weight, path + [nbr]))
         
         return None, None, explored
     
     def astar_osm(self, start: int, end: int, heuristic_type: str = "euclidean") -> Tuple[Optional[List[int]], Optional[float], set]:
         """A* Search implementation with selectable heuristic."""
-        # Select heuristic function
         if heuristic_type == "manhattan":
             heuristic_func = self.manhattan_heuristic
         elif heuristic_type == "combined":
             heuristic_func = self.combined_heuristic
-        else:  # default to euclidean
+        else:
             heuristic_func = self.euclidean_heuristic
         
-        frontier = [(heuristic_func(start, end), 0, [start])]
+        frontier = [(heuristic_func(start, end), 0.0, [start])]
         explored = set()
         
         while frontier:
@@ -150,7 +161,7 @@ class CampusPathfinder:
                     if nbr not in explored:
                         edge_data = self.graph.get_edge_data(node, nbr)
                         if edge_data:
-                            weight = min([d.get('length', 1) for d in edge_data.values()])
+                            weight = min([d.get('length', 1.0) for d in edge_data.values()])
                             new_g = g + weight
                             new_f = new_g + heuristic_func(nbr, end)
                             heapq.heappush(frontier, (new_f, new_g, path + [nbr]))
@@ -176,19 +187,18 @@ class CampusPathfinder:
         for i in range(len(path) - 1):
             edge_data = self.graph.get_edge_data(path[i], path[i + 1])
             if edge_data:
-                weight = min([d.get('length', 0) for d in edge_data.values()])
+                weight = min([d.get('length', 0.0) for d in edge_data.values()])
                 total_distance += weight
         
         return total_distance
     
     def calculate_walking_time(self, distance: float) -> float:
         """Calculate estimated walking time in minutes."""
-        return (distance / self.WALKING_SPEED) / 60  # Convert to minutes
+        return (distance / self.WALKING_SPEED) / 60.0
     
     def get_location_info(self, location_name: str) -> Dict[str, Any]:
         """Get information about a specific location."""
-        coordinates = self.POIS.get(location_name, (0, 0))
-        
+        coordinates = self.POIS.get(location_name, (0.0, 0.0))
         return {
             'name': location_name,
             'coordinates': f"{coordinates[0]:.5f}, {coordinates[1]:.5f}",
@@ -217,12 +227,10 @@ class CampusPathfinder:
         """Create a base map with all roads and POIs."""
         m = folium.Map(location=self.center, zoom_start=17)
         
-        # Add all roads in gray
         for _, row in self.edges.iterrows():
             coords = [(lat, lon) for lon, lat in row.geometry.coords]
             folium.PolyLine(coords, color="gray", weight=2, opacity=0.4).add_to(m)
         
-        # Add POI markers
         for name, (lat, lon) in self.POIS.items():
             folium.Marker(
                 (lat, lon),
@@ -235,13 +243,17 @@ class CampusPathfinder:
     
     def find_path(self, start_name: str, end_name: str, algorithm: str) -> Dict[str, Any]:
         """Find path between two locations using specified algorithm."""
+        logger.info(f"Finding path from '{start_name}' to '{end_name}' using algorithm '{algorithm}'")
+        
+        if start_name not in self.POIS or end_name not in self.POIS:
+            raise KeyError(f"Invalid POI names provided: {start_name} -> {end_name}")
+            
         start_latlon = self.POIS[start_name]
         end_latlon = self.POIS[end_name]
         
         start_node = ox.distance.nearest_nodes(self.graph, start_latlon[1], start_latlon[0])
         end_node = ox.distance.nearest_nodes(self.graph, end_latlon[1], end_latlon[0])
         
-        # Run the selected algorithm
         if algorithm == "BFS":
             path, explored = self.bfs_osm(start_node, end_node)
             cost = self.calculate_path_distance(path) if path else None
@@ -256,21 +268,19 @@ class CampusPathfinder:
             path, cost, explored = self.astar_manhattan(start_node, end_node)
         elif algorithm == "A* (Combined)":
             path, cost, explored = self.astar_combined(start_node, end_node)
-        else:  # Default A*
+        else:
             path, cost, explored = self.astar_osm(start_node, end_node)
         
         if not path:
-            raise Exception("No path found between the selected locations")
+            logger.warning(f"No path found between {start_name} and {end_name}")
+            raise PathNotFoundError(f"No path found between {start_name} and {end_name} using {algorithm}")
         
-        # Create visualization map
         m = folium.Map(location=self.center, zoom_start=17)
         
-        # Add all roads in gray
         for _, row in self.edges.iterrows():
             coords = [(lat, lon) for lon, lat in row.geometry.coords]
             folium.PolyLine(coords, color="gray", weight=2, opacity=0.4).add_to(m)
         
-        # Add explored nodes in orange
         for node in explored:
             y, x = self.graph.nodes[node]['y'], self.graph.nodes[node]['x']
             folium.CircleMarker(
@@ -281,15 +291,10 @@ class CampusPathfinder:
                 popup=f"Explored: {node}"
             ).add_to(m)
         
-        # Add final path
-        if path:
-            coords = [(self.graph.nodes[n]['y'], self.graph.nodes[n]['x']) for n in path]
-            # White outline
-            folium.PolyLine(coords, color="white", weight=8, opacity=0.8).add_to(m)
-            # Blue path
-            folium.PolyLine(coords, color="blue", weight=4, opacity=1).add_to(m)
+        coords = [(self.graph.nodes[n]['y'], self.graph.nodes[n]['x']) for n in path]
+        folium.PolyLine(coords, color="white", weight=8, opacity=0.8).add_to(m)
+        folium.PolyLine(coords, color="blue", weight=4, opacity=1).add_to(m)
         
-        # Add start and end markers
         folium.Marker(
             start_latlon,
             popup=f"Start: {start_name}",
@@ -302,9 +307,10 @@ class CampusPathfinder:
             icon=folium.Icon(color="red", icon="stop")
         ).add_to(m)
         
-        # Calculate metrics
-        distance = cost if cost else self.calculate_path_distance(path)
+        distance = cost if cost is not None else self.calculate_path_distance(path)
         walking_time = self.calculate_walking_time(distance)
+        
+        logger.info(f"Path calculated successfully. Distance: {distance:.2f}m, Time: {walking_time:.2f}min")
         
         return {
             'map': m,
@@ -319,8 +325,8 @@ class CampusPathfinder:
     
     def compare_algorithms(self) -> List[Dict[str, Any]]:
         """Compare all algorithms on multiple test routes."""
-        # Define test cases
-        test_routes = [
+        logger.info("Running algorithm performance comparison")
+        test_cases = [
             ("Entry gate", "Library"),
             ("Library", "Food Court"),
             ("Cricket Ground", "Hostel Block")
@@ -330,34 +336,37 @@ class CampusPathfinder:
         results = []
         
         for algo in algorithms:
-            total_distance = 0
+            total_distance = 0.0
             total_nodes = 0
             successful_runs = 0
             
-            for start, end in test_routes:
+            for start, end in test_cases:
                 try:
                     result = self.find_path(start, end, algo)
                     total_distance += result['metrics']['distance']
                     total_nodes += result['metrics']['nodes_explored']
                     successful_runs += 1
-                except:
+                except Exception as e:
+                    logger.error(f"Error during comparison run of {algo} from {start} to {end}: {e}")
                     continue
             
             if successful_runs > 0:
+                avg_dist = total_distance / successful_runs
+                avg_nodes = total_nodes / successful_runs
                 results.append({
                     'Algorithm': algo,
-                    'Average Distance (m)': round(total_distance / successful_runs, 2),
-                    'Average Nodes Explored': round(total_nodes / successful_runs, 2),
-                    'Average Time (min)': round(self.calculate_walking_time(total_distance / successful_runs), 2),
-                    'Success Rate': f"{successful_runs}/{len(test_routes)}"
+                    'Average Distance (m)': round(avg_dist, 2),
+                    'Average Nodes Explored': round(avg_nodes, 2),
+                    'Average Time (min)': round(self.calculate_walking_time(avg_dist), 2),
+                    'Success Rate': f"{successful_runs}/{len(test_cases)}"
                 })
         
         return results
     
     def compare_heuristics(self) -> List[Dict[str, Any]]:
         """Compare A* algorithm with different heuristics on multiple test routes."""
-        # Define test cases
-        test_routes = [
+        logger.info("Running heuristic comparison")
+        test_cases = [
             ("Entry gate", "Library"),
             ("Library", "Food Court"),
             ("Cricket Ground", "Hostel Block"),
@@ -373,48 +382,52 @@ class CampusPathfinder:
         results = []
         
         for heuristic in heuristics:
-            total_distance = 0
+            total_distance = 0.0
             total_nodes = 0
-            total_time = 0
+            total_time = 0.0
             successful_runs = 0
             
-            for start, end in test_routes:
+            for start, end in test_cases:
                 try:
                     result = self.find_path(start, end, heuristic)
                     total_distance += result['metrics']['distance']
                     total_nodes += result['metrics']['nodes_explored']
                     total_time += result['metrics']['time']
                     successful_runs += 1
-                except:
+                except Exception as e:
+                    logger.error(f"Error during heuristic run of {heuristic} from {start} to {end}: {e}")
                     continue
             
             if successful_runs > 0:
+                avg_dist = total_distance / successful_runs
+                avg_nodes = total_nodes / successful_runs
+                avg_time = total_time / successful_runs
+                efficiency_score = avg_dist / avg_nodes if avg_nodes > 0 else 0
+                
                 heuristic_name = heuristic.replace("A* (", "").replace(")", "")
                 results.append({
                     'Heuristic Type': heuristic_name,
-                    'Average Distance (m)': round(total_distance / successful_runs, 2),
-                    'Average Nodes Explored': round(total_nodes / successful_runs, 2),
-                    'Average Time (min)': round(total_time / successful_runs, 2),
-                    'Efficiency Score': round((total_distance / successful_runs) / (total_nodes / successful_runs), 4),
-                    'Success Rate': f"{successful_runs}/{len(test_routes)}"
+                    'Average Distance (m)': round(avg_dist, 2),
+                    'Average Nodes Explored': round(avg_nodes, 2),
+                    'Average Time (min)': round(avg_time, 2),
+                    'Efficiency Score': round(efficiency_score, 4),
+                    'Success Rate': f"{successful_runs}/{len(test_cases)}"
                 })
         
         return results
     
     def extract_locations(self, query: str) -> list:
-        """Extract location names from a query string."""
+        """Extract POI location names from a query string."""
         locations = []
         query_lower = query.lower()
         
         for poi in self.POIS.keys():
-            # Check for exact matches and common variations
             poi_variations = [
                 poi.lower(),
                 poi.replace(" ", "").lower(),
                 poi.replace("block", "").lower(),
                 poi.replace("court", "").lower()
             ]
-            
             if any(var in query_lower for var in poi_variations):
                 locations.append(poi)
         

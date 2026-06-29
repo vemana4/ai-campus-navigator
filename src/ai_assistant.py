@@ -1,11 +1,11 @@
 from google import genai
 from google.genai import types
-from typing import Dict, Any, Optional
-import streamlit as st
+from typing import Dict, Any, Optional, List, Tuple
 import re
 import os
 from datetime import datetime
 from difflib import SequenceMatcher
+from src.logger import logger
 
 def get_string_similarity(s1: str, s2: str) -> float:
     """Calculate similarity ratio between two strings."""
@@ -16,20 +16,22 @@ def normalize_location_name(name: str) -> str:
     return re.sub(r'[^a-z0-9]', '', name.lower())
 
 class GeminiAssistant:
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None):
         """Initialize the Gemini AI assistant with campus knowledge."""
-        # Initialize Gemini client with API key
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            try:
-                api_key = st.secrets.get("GEMINI_API_KEY")
-            except:
-                pass
+        # Use provided API key or fallback to environment variables
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         
-        if api_key:
-            self.client = genai.Client(api_key=api_key)
+        if self.api_key:
+            try:
+                self.client = genai.Client(api_key=self.api_key)
+                logger.info("Gemini Client successfully initialized.")
+            except Exception as e:
+                logger.error(f"Failed to initialize Gemini GenAI Client: {e}", exc_info=True)
+                self.client = None
         else:
+            logger.warning("No Gemini API key provided. Running assistant in local offline fallback mode.")
             self.client = None
+            
         self.campus_info = {
             "Flag post": {
                 "name": "Main Flag Post",
@@ -169,28 +171,28 @@ class GeminiAssistant:
             }
         }
         
-        # Enhanced navigation patterns
         self.navigation_patterns = [
             r'(?:how (?:do|can|to))?\s*(?:get|go|walk|reach)\s+(?:from\s+)?([\w\s]+)\s+to\s+([\w\s]+)',
             r'(?:show|find|give)\s+(?:me\s+)?(?:the\s+)?(?:route|path|way|directions?)\s+(?:from\s+)?([\w\s]+)\s+to\s+([\w\s]+)',
             r'directions?\s+(?:from\s+)?([\w\s]+)\s+to\s+([\w\s]+)'
         ]
 
-    def get_response(self, query: str) -> Dict[str, Any]:
-        """Process user query with enhanced NLP."""
+    def get_response(self, query: str, context: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Process user query and return the response and updated context."""
+        logger.info(f"Processing AI assistant query: '{query}'")
         try:
+            if context is None:
+                context = {
+                    'last_location': None,
+                    'last_query_type': None,
+                    'conversation_history': []
+                }
+                
             query_lower = query.lower()
-            
-            # Initialize response with context
             response = self._initialize_response()
             
-            # Check conversation context
-            context = self._get_conversation_context()
-            
-            # Extract locations using regex patterns
             locations = self._extract_locations(query_lower, context)
             
-            # Determine query type and handle accordingly
             if self._is_navigation_query(query_lower):
                 response.update(self._handle_navigation_query(query_lower, locations))
             elif locations:
@@ -198,23 +200,27 @@ class GeminiAssistant:
             else:
                 response.update(self._handle_general_query(query_lower))
             
-            # Update conversation context
-            self._update_conversation_context(response)
+            # Update context
+            if response['locations']:
+                context['last_location'] = response['locations'][-1]
+            context['conversation_history'].append({
+                'timestamp': response['timestamp'],
+                'query_understood': response['query_understood']
+            })
             
-            return response
-
+            return response, context
+            
         except Exception as e:
-            print(f"Error processing query: {str(e)}")
-            return self._create_error_response(str(e))
+            logger.error(f"Error handling query assistant: {e}", exc_info=True)
+            err_res = self._create_error_response(str(e))
+            return err_res, context or {}
 
     def _extract_locations(self, query: str, context: Dict) -> list:
         """Extract locations using enhanced fuzzy matching."""
         locations = []
-        query_normalized = normalize_location_name(query)
         
-        # Check for locations in navigation patterns
         for pattern in self.navigation_patterns:
-            matches = re.search(pattern, query.lower())
+            matches = re.search(pattern, query)
             if matches:
                 potential_locations = [loc.strip() for loc in matches.groups() if loc]
                 for pot_loc in potential_locations:
@@ -222,16 +228,13 @@ class GeminiAssistant:
                     if best_match:
                         locations.append(best_match)
         
-        # If no locations found through patterns, try direct matching
         if not locations:
-            # Try to find any location mentions with fuzzy matching
-            words = query.lower().split()
+            words = query.split()
             for word in words:
                 best_match = self._find_best_matching_location(word)
                 if best_match and best_match not in locations:
                     locations.append(best_match)
         
-        # Handle contextual references
         if not locations and ('here' in query or 'there' in query):
             if context.get('last_location'):
                 locations.append(context['last_location'])
@@ -242,23 +245,19 @@ class GeminiAssistant:
         """Find best matching location using fuzzy matching."""
         best_match = None
         highest_score = threshold
-        
         query_normalized = normalize_location_name(query_term)
         
         for loc_key, loc_info in self.campus_info.items():
-            # Check original location key
             score = get_string_similarity(query_normalized, normalize_location_name(loc_key))
             if score > highest_score:
                 highest_score = score
                 best_match = loc_key
             
-            # Check location name
             score = get_string_similarity(query_normalized, normalize_location_name(loc_info['name']))
             if score > highest_score:
                 highest_score = score
                 best_match = loc_key
             
-            # Check common variations
             variations = [
                 loc_key.replace('_', ' '),
                 loc_info['name'].lower(),
@@ -287,27 +286,6 @@ class GeminiAssistant:
             "query_understood": False
         }
 
-    def _get_conversation_context(self) -> Dict[str, Any]:
-        """Get conversation context from session state."""
-        if 'conversation_context' not in st.session_state:
-            st.session_state.conversation_context = {
-                'last_location': None,
-                'last_query_type': None,
-                'conversation_history': []
-            }
-        return st.session_state.conversation_context
-
-    def _update_conversation_context(self, response: Dict[str, Any]):
-        """Update conversation context with current response."""
-        context = self._get_conversation_context()
-        if response['locations']:
-            context['last_location'] = response['locations'][-1]
-        context['conversation_history'].append({
-            'timestamp': response['timestamp'],
-            'query_understood': response['query_understood']
-        })
-        st.session_state.conversation_context = context
-
     def _is_navigation_query(self, query: str) -> bool:
         """Enhanced navigation query detection."""
         return any(re.search(pattern, query) for pattern in self.navigation_patterns)
@@ -320,18 +298,7 @@ class GeminiAssistant:
             end_info = self.campus_info[end_loc]
             
             return {
-                "text": f"""### 🗺️ Navigation Instructions
-I'll help you get from {start_info['name']} to {end_info['name']}.
-
-**Start Point:** {start_info['location']}
-**Destination:** {end_info['location']}
-**Notable Landmarks:** Near {', '.join(end_info['nearby'])}
-
-*The route is now displayed on the map above* ⬆️
-
-**Additional Information:**
-- Destination Hours: {end_info['hours']}
-- Available Facilities: {', '.join(end_info['facilities'])}""",
+                "text": f"### 🗺️ Navigation Instructions\nI'll help you get from {start_info['name']} to {end_info['name']}.\n\n**Start Point:** {start_info['location']}\n**Destination:** {end_info['location']}\n**Notable Landmarks:** Near {', '.join(end_info['nearby'])}\n\n*The route is now displayed on the map*\n\n**Additional Information:**\n- Destination Hours: {end_info['hours']}\n- Available Facilities: {', '.join(end_info['facilities'])}",
                 "show_route": True,
                 "start": start_loc,
                 "end": end_loc,
@@ -340,11 +307,7 @@ I'll help you get from {start_info['name']} to {end_info['name']}.
             }
         
         return {
-            "text": """### 🤔 Need More Information
-Please specify both start and destination locations. For example:
-- "How do I get from the library to the cafeteria?"
-- "Show me the way from the entrance to the academic block"
-""",
+            "text": "### 🤔 Need More Information\nPlease specify both start and destination locations. For example:\n- \"How do I get from the library to the cafeteria?\"\n- \"Show me the way from the entrance to the academic block\"\n",
             "show_route": False,
             "locations": []
         }
@@ -354,25 +317,12 @@ Please specify both start and destination locations. For example:
         info = self.campus_info[location]
         
         if "hour" in query or "time" in query or "open" in query:
-            response_text = f"""### ⏰ {info['name']} Hours
-- **Operating Hours:** {info['hours']}
-- **Location:** {info['location']}"""
-        
+            response_text = f"### ⏰ {info['name']} Hours\n- **Operating Hours:** {info['hours']}\n- **Location:** {info['location']}"
         elif "facilities" in query or "available" in query:
-            response_text = f"""### 🏢 {info['name']} Facilities
-- **Available Facilities:**
-{chr(10).join(['  • ' + f for f in info['facilities']])}
-- **Location:** {info['location']}
-- **Hours:** {info['hours']}"""
-        
+            response_text = f"### 🏢 {info['name']} Facilities\n- **Available Facilities:**\n" + "\n".join([f"  • {f}" for f in info['facilities']])
         else:
-            response_text = f"""### 📍 {info['name']}
-- **Description:** {info['description']}
-- **Location:** {info['location']}
-- **Hours:** {info['hours']}
-- **Nearby:** {', '.join(info['nearby'])}
-- **Facilities:** {', '.join(info['facilities'])}"""
-
+            response_text = f"### 📍 {info['name']}\n- **Description:** {info['description']}\n- **Location:** {info['location']}\n- **Hours:** {info['hours']}\n- **Nearby:** {', '.join(info['nearby'])}"
+            
         return {
             "text": response_text,
             "show_route": False,
@@ -383,7 +333,6 @@ Please specify both start and destination locations. For example:
         """Handle general queries about campus using Gemini AI."""
         if self.client:
             try:
-                # Create a context-aware prompt
                 campus_context = "Campus Information:\n"
                 for loc, info in self.campus_info.items():
                     campus_context += f"- {info['name']} ({loc}): {info['description']}\n"
@@ -397,6 +346,7 @@ User Question: {query}
 
 Please provide a helpful, informative response about the campus. If the question is about navigation, suggest they use the route planning feature."""
 
+                logger.info("Querying Gemini GenAI model...")
                 response = self.client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=prompt
@@ -409,10 +359,9 @@ Please provide a helpful, informative response about the campus. If the question
                     "query_understood": True
                 }
             except Exception as e:
-                # Fallback to static response if API fails
+                logger.error(f"Gemini generation error: {e}", exc_info=True)
                 pass
         
-        # Fallback static response
         return {
             "text": """### 🎓 Campus Navigation Help
 I can help you with:
@@ -421,8 +370,7 @@ I can help you with:
 3. **Facilities:** Ask "What facilities are in X?"
 4. **Hours:** Ask "When is X open?"
 
-**Available Locations:**
-{}""".format('\n'.join([f"- {info['name']}" for info in self.campus_info.values()])),
+**Available Locations:**\n""" + "\n".join([f"- {info['name']}" for info in self.campus_info.values()]),
             "show_route": False,
             "locations": [],
             "query_understood": False
@@ -431,14 +379,7 @@ I can help you with:
     def _create_error_response(self, error: str) -> Dict[str, Any]:
         """Create a helpful error response."""
         return {
-            "text": f"""### ❌ I encountered an issue
-I apologize, but I had trouble processing your request. 
-Try asking in a different way, for example:
-- "How do I get to the library?"
-- "What facilities are in the cafeteria?"
-- "Show me the way from entrance to academic block"
-
-Technical details: {error}""",
+            "text": f"### ❌ I encountered an issue\nI apologize, but I had trouble processing your request. Please try again later.\n\nTechnical details: {error}",
             "show_route": False,
             "start": None,
             "end": None,
